@@ -1,0 +1,138 @@
+---
+- name: Configurar servidores web Linux (NGINX + SSL)
+  hosts: webservers
+  become: yes
+
+  vars:
+    domain: "redes.eastus2.cloudapp.azure.com"
+    webroot: "/var/www/html"
+
+  tasks:
+
+    # -------------------------------------------------------
+    # 1. Actualizar paquetes
+    # -------------------------------------------------------
+    - name: Actualizar lista de paquetes
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    # -------------------------------------------------------
+    # 2. Instalar NGINX y Certbot
+    # -------------------------------------------------------
+    - name: Instalar NGINX y Certbot
+      apt:
+        name:
+          - nginx
+          - certbot
+          - python3-certbot-nginx
+        state: present
+
+    # -------------------------------------------------------
+    # 3. Habilitar y arrancar NGINX
+    # -------------------------------------------------------
+    - name: Habilitar y arrancar NGINX
+      systemd:
+        name: nginx
+        enabled: yes
+        state: started
+
+    # -------------------------------------------------------
+    # 4. Crear directorio webroot (por si no existe)
+    # -------------------------------------------------------
+    - name: Crear directorio webroot
+      file:
+        path: "{{ webroot }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    # -------------------------------------------------------
+    # 5. Obtener certificado SSL con Certbot
+    # -------------------------------------------------------
+    - name: Obtener certificado SSL con Certbot
+      command: >
+        certbot --nginx
+        --non-interactive
+        --agree-tos
+        --email admin@{{ domain }}
+        -d {{ domain }}
+      args:
+        creates: "/etc/letsencrypt/live/{{ domain }}/fullchain.pem"
+      notify: Recargar NGINX
+
+    # -------------------------------------------------------
+    # 6. Copiar configuración de NGINX (HTTPS + redirect HTTP)
+    # -------------------------------------------------------
+    - name: Copiar configuración de NGINX
+      template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/sites-available/redes
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Recargar NGINX
+
+    - name: Activar sitio (symlink)
+      file:
+        src: /etc/nginx/sites-available/redes
+        dest: /etc/nginx/sites-enabled/redes
+        state: link
+      notify: Recargar NGINX
+
+    - name: Desactivar sitio default
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Recargar NGINX
+
+    # -------------------------------------------------------
+    # 7. Validar configuración de NGINX
+    # -------------------------------------------------------
+    - name: Validar configuración de NGINX
+      command: nginx -t
+      changed_when: false
+
+    # -------------------------------------------------------
+    # 8. Renovación automática del certificado SSL
+    # -------------------------------------------------------
+    - name: Cron job para renovar certificado SSL
+      cron:
+        name: "Renovar certificado Let's Encrypt"
+        minute: "0"
+        hour: "3"
+        day: "*/15"
+        job: "certbot renew --quiet && systemctl reload nginx"
+
+    # -------------------------------------------------------
+    # 9. Configurar firewall (UFW)
+    # -------------------------------------------------------
+    - name: Permitir SSH
+      ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+
+    - name: Permitir HTTPS
+      ufw:
+        rule: allow
+        port: '443'
+        proto: tcp
+
+    - name: Permitir HTTP (necesario para Certbot y redirección)
+      ufw:
+        rule: allow
+        port: '80'
+        proto: tcp
+
+    - name: Habilitar UFW
+      ufw:
+        state: enabled
+        policy: deny
+
+  handlers:
+    - name: Recargar NGINX
+      systemd:
+        name: nginx
+        state: reloaded
